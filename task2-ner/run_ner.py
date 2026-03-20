@@ -106,17 +106,27 @@ class NERModel(LightningModule):
         # 설정 저장
         self.args: TrainerArguments | TesterArguments | ServerArguments = args
 
-        # TODO Step 1-1:
-        # Build the corpus, label maps, fast tokenizer, and pretrained token-classification model here.
-        # self.data = NERCorpus(args)
-        # self.labels = self.data.labels
-        # self._label_to_id = {...}
-        # self._id_to_label = {...}
-        # self.lm_config = AutoConfig.from_pretrained(...)
-        # self.lm_tokenizer = AutoTokenizer.from_pretrained(...)
-        # self.lang_model = AutoModelForTokenClassification.from_pretrained(...)
-        raise NotImplementedError(
-            "TODO Step 1-1: load the NER corpus, label maps, tokenizer, and pretrained model here."
+        self.data = NERCorpus(args)
+        self.labels: List[str] = self.data.labels
+        self._label_to_id: Dict[str, int] = {
+            label: i for i, label in enumerate(self.labels)
+        }
+        self._id_to_label: Dict[int, str] = {
+            i: label for i, label in enumerate(self.labels)
+        }
+        self.lm_config = AutoConfig.from_pretrained(
+            str(self.args.model.pretrained),
+            num_labels=self.data.num_labels,
+            id2label=self._id_to_label,
+            label2id=self._label_to_id,
+        )
+        self.lm_tokenizer = AutoTokenizer.from_pretrained(
+            str(self.args.model.pretrained),
+            use_fast=True,
+        )
+        self.lang_model = AutoModelForTokenClassification.from_pretrained(
+            str(self.args.model.pretrained),
+            config=self.lm_config,
         )
 
         # 라벨 수 검증
@@ -208,13 +218,23 @@ class NERModel(LightningModule):
         # 분산 학습 시 로깅 설정
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
 
-        # TODO Step 1-2:
-        # Build the NER training dataset/dataloader here so tokenization and label batching stay visible in context.
-        # train_dataset = NERDataset(...)
-        # train_dataloader = DataLoader(...)
-        raise NotImplementedError(
-            "TODO Step 1-2: build the NER training dataset and dataloader in this block."
+        train_dataset = NERDataset("train", data=self.data, tokenizer=self.lm_tokenizer)
+        train_dataloader = DataLoader(
+            train_dataset,
+            sampler=RandomSampler(train_dataset),
+            num_workers=self.args.hardware.cpu_workers,
+            batch_size=self.args.hardware.train_batch,
+            collate_fn=self.data.encoded_examples_to_batch,
+            drop_last=False,
         )
+
+        self.fabric.print(
+            f"Created train_dataset providing {len(train_dataset)} examples"
+        )
+        self.fabric.print(
+            f"Created train_dataloader providing {len(train_dataloader)} batches"
+        )
+        return train_dataloader
 
     def val_dataloader(self):
         """
@@ -287,15 +307,19 @@ class NERModel(LightningModule):
         Returns:
             Dict: loss와 accuracy를 포함한 딕셔너리
         """
-        # TODO Step 2-1:
-        # Run the forward pass here, ignore padded labels correctly, and compute token accuracy.
-        # inputs.pop("example_ids")
-        # outputs = self.lang_model(**inputs)
-        # labels = inputs["labels"]
-        # preds = outputs.logits.argmax(dim=-1)
-        # acc = accuracy(..., ignore_index=0)
-        raise NotImplementedError(
-            "TODO Step 2-1: implement the token-classification training step here."
+        inputs = dict(inputs)
+        inputs.pop("example_ids", None)
+        labels = inputs["labels"]
+        attention_mask = inputs.get("attention_mask")
+        loss_labels = labels
+        if attention_mask is not None:
+            loss_labels = labels.masked_fill(attention_mask == 0, -100)
+        outputs = self.lang_model(**{**inputs, "labels": loss_labels})
+        preds = outputs.logits.argmax(dim=-1)
+        valid_mask = attention_mask.bool() if attention_mask is not None else torch.ones_like(labels, dtype=torch.bool)
+        acc = accuracy(
+            preds=preds[valid_mask],
+            labels=labels[valid_mask],
         )
 
         return {
@@ -318,18 +342,18 @@ class NERModel(LightningModule):
         Returns:
             Dict: loss, 토큰 레벨 예측값들, 토큰 레벨 라벨들
         """
-        # TODO Step 2-2:
-        # Keep validation simple: remove example_ids, run the model, and collect only non-padding token labels.
-        # inputs.pop("example_ids")
-        # outputs = self.lang_model(**inputs)
-        # labels = inputs["labels"]
-        # preds = outputs.logits.argmax(dim=-1)
-        # valid_mask = labels != 0
-        # list_of_token_pred_ids = preds[valid_mask].tolist()
-        # list_of_token_label_ids = labels[valid_mask].tolist()
-        raise NotImplementedError(
-            "TODO Step 2-2: implement the token-level validation logic here."
-        )
+        inputs = dict(inputs)
+        inputs.pop("example_ids", None)
+        labels = inputs["labels"]
+        attention_mask = inputs.get("attention_mask")
+        loss_labels = labels
+        if attention_mask is not None:
+            loss_labels = labels.masked_fill(attention_mask == 0, -100)
+        outputs = self.lang_model(**{**inputs, "labels": loss_labels})
+        preds = outputs.logits.argmax(dim=-1)
+        valid_mask = attention_mask.bool() if attention_mask is not None else torch.ones_like(labels, dtype=torch.bool)
+        list_of_token_pred_ids = preds[valid_mask].tolist()
+        list_of_token_label_ids = labels[valid_mask].tolist()
         return {
             "loss": outputs.loss,
             "preds": list_of_token_pred_ids,
@@ -361,12 +385,42 @@ class NERModel(LightningModule):
         Returns:
             Dict: 토큰별 개체명 라벨과 확률을 포함한 결과
         """
-        # TODO Step 3:
-        # Complete the full NER inference flow in one place:
-        # tokenize -> run the model -> decode token labels/probabilities -> build the web response dictionary.
-        raise NotImplementedError(
-            "TODO Step 3: implement the full NER inference flow here."
+        encoded = self.lm_tokenizer.encode_plus(
+            text,
+            max_length=self.args.model.seq_len,
+            truncation=True,
+            padding="max_length",
         )
+        device = next(self.lang_model.parameters()).device
+        inputs = {
+            k: torch.tensor([v], device=device)
+            for k, v in encoded.items()
+            if k in ("input_ids", "attention_mask", "token_type_ids")
+        }
+        outputs = self.lang_model(**inputs)
+        probs = outputs.logits.softmax(dim=-1)[0]
+        pred_ids = probs.argmax(dim=-1)
+
+        result = []
+        for token_idx, token in enumerate(encoded.tokens()):
+            token_span = encoded.token_to_chars(token_idx)
+            if token_span is None:
+                continue
+            token_text = text[token_span.start:token_span.end]
+            pred_id = int(pred_ids[token_idx].item())
+            pred_prob = float(probs[token_idx, pred_id].item())
+            result.append(
+                {
+                    "token": token_text,
+                    "label": self.id_to_label(pred_id),
+                    "prob": round(pred_prob, 6),
+                }
+            )
+
+        return {
+            "sentence": text,
+            "result": result,
+        }
 
     def run_server(self, server: Flask, *args, **kwargs):
         """
