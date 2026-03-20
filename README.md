@@ -63,7 +63,7 @@ Transformer-based Korean Natural Language Processing
     pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
     rm -rf transformers; git clone https://github.com/chrisjihee/transformers.git; pip install -U -e transformers
     rm -rf ratsnlp;      git clone https://github.com/chrisjihee/ratsnlp.git;      pip install -U -e ratsnlp
-    pip list | grep -E "torch|lightn|trans|accel|speed|flash|numpy|piece|chris|rats|prog|pydantic"
+    pip list | grep -E "torch|lightn|trans|accel|speed|flash|numpy|piece|chris|rats|prog|pydantic|tensor"
     ```
 6. Login to Hugging Face and link the cache
     ```bash
@@ -104,7 +104,7 @@ Transformer-based Korean Natural Language Processing
     - `python task4A-qa-ext/train_qa.py --help`
     - `python task4A-qa-ext/train_qa.py --model_name_or_path klue/bert-base --train_file data/korquad/train-half.jsonl --validation_file data/korquad/validation.jsonl --output_dir output/korquad-lab --do_eval --max_eval_samples 4`
     - `python task4A-qa-ext/train_qa.py --model_name_or_path klue/bert-base --train_file data/korquad/train-half.jsonl --validation_file data/korquad/validation.jsonl --output_dir output/korquad-lab --do_train --do_eval`
-    - `python task4A-qa-ext/serve_qa.py --pretrained "output/korquad-lab/checkpoint-*"`
+    - `python task4A-qa-ext/serve_qa.py --pretrained "output/korquad/train_qa-by-kpfbert/checkpoint-*"`
     - `python task4A-qa-ext/infer_qa.py`
     - `bash task4A-qa-ext/train_qa-1.sh`
     - `bash task4A-qa-ext/train_qa-2.sh`
